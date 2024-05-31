@@ -1,0 +1,9 @@
+[project]
+name = "main"
+version = "0.0.0"
+dependencies = ["logging", "langchain", "langchain_openai"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
