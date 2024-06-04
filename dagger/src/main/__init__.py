@@ -67,7 +67,7 @@ class DebtRepayment:
         data_json = json.loads(data)
         if not data_json:
             return json.dumps([])
-        required_columns = ['Interest Checking - Fixed (xxxx5222)', 'Savings Account (xxxx8919)']
+        required_columns = ['Interest Checking - Fixed (XXX)', 'Savings Account (XXX)']
         processed_data = []
         for row in data_json:
             filtered_row = {col: row[col] for col in required_columns if col in row}
