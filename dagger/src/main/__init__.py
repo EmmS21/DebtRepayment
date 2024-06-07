@@ -295,11 +295,16 @@ class DebtRepayment:
                 """
                 debt_payments = []
                 total_min_payments = 0
-                
+
+                print(f"Debts: {debts}")
+                print(f"Available Funds: {available_funds}")
+                print(f"Expected Stock Return: {expected_stock_return}")
+                print(f"Multiplier Scores: {multiplier_scores}")
+
                 # Calculate total minimum payments
                 for debt in debts:
                     min_payment = debt.get('min_payment', 50) 
-                    if min_payment is None:
+                    if min_payment is None or min_payment == 0:
                         min_payment = 50
                     if isinstance(min_payment, (int, float)):
                         total_min_payments += min_payment
@@ -315,11 +320,13 @@ class DebtRepayment:
                 # Distribute minimum payments
                 for debt in debts:
                     min_payment = debt.get('min_payment', 50)  
-                    if min_payment is None:
+                    if min_payment is None or min_payment == 0:
                         min_payment = 50
                     debt_payments.append({'debt_name': debt['debt_name'], 'payment_amount': min_payment})
                 
-                # Use remaining funds to maximize wealth
+                print(f"Debt Payments: {debt_payments}")
+                print(f"Remaining Funds: {remaining_funds}")
+
                 optimal_payments = {
                     'debt_payments': debt_payments,
                     'investment_amount': 0,
@@ -332,7 +339,7 @@ class DebtRepayment:
                     debt_amount = debt['debt_amount']
                     interest_rate = debt['interest_rate']
                     min_payment = debt.get('min_payment', 50)  
-                    if min_payment is None:
+                    if min_payment is None or min_payment == 0:
                         min_payment = 50
                     multiplier_score = multiplier_scores.get(debt_name, 0.1) 
 
@@ -340,7 +347,10 @@ class DebtRepayment:
                         raise ValueError(f"Invalid min_payment for debt {debt_name}: {min_payment}")
                     
                     result_json = debt_investment_optimizer(debt_amount, interest_rate, expected_stock_return, multiplier_score, remaining_funds, min_payment)
-                    result = json.loads(result_json)                      
+                    result = json.loads(result_json)
+
+                    print(f"Result for {debt_name}: {result}")
+                      
                     if result['total_wealth'] > max_wealth:
                         max_wealth = result['total_wealth']
                         optimal_payments = {
@@ -348,9 +358,9 @@ class DebtRepayment:
                             'investment_amount': result['investment_amount'],
                             'total_wealth': result['total_wealth']
                         }
+                        
+                print(f"Optimal Payments: {optimal_payments}")
                 return optimal_payments
-
-
 
             fetch_debt_str = json.dumps(fetch_debt)
             input_str = f"I have a balance of $2,000 and need an optimal payment strategy. Analyze my debts: {fetch_debt_str} and investments. Consider the top-performing stocks from Health Care and Information Technology sectors, and compare their investment returns with debt repayment benefits over a period of time."
