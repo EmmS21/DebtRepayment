@@ -10,6 +10,7 @@ import re
 import redis
 import numpy as np
 from langchain.globals import set_debug
+from itertools import product
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -177,6 +178,7 @@ class DebtRepayment:
             async def validate_allocations(allocations: str, budget: float = 2000.0) -> str:
                 """
                 Validate that the total allocations do not exceed the budget.
+                If the total exceeds the budget, distribute the remaining budget proportionally among the allocations.
 
                 Args:
                     allocations (str): A JSON string representing a list of allocation dictionaries, each containing 'type', 'name', and 'amount'.
@@ -191,32 +193,19 @@ class DebtRepayment:
                     is_within_budget = total_allocated <= budget
 
                     if not is_within_budget:
+                        remaining_budget = budget
                         validated_allocations = []
-                        total_allocated = 0.0
-
                         for allocation in allocations_list:
-                            if total_allocated + allocation['amount'] <= budget:
-                                validated_allocations.append(allocation)
-                                total_allocated += allocation['amount']
-                            else:
-                                remaining_budget = budget - total_allocated
-                                if remaining_budget > 0:
-                                    allocation['amount'] = remaining_budget
-                                    validated_allocations.append(allocation)
-                                    total_allocated += remaining_budget
-                                break
+                            allocation_share = allocation['amount'] / total_allocated * remaining_budget
+                            allocation['amount'] = allocation_share
+                            validated_allocations.append(allocation)
+                            remaining_budget -= allocation_share
 
-                        result = {
-                            'total_allocated': total_allocated,
-                            'is_within_budget': total_allocated <= budget,
-                            'validated_allocations': validated_allocations
-                        }
-                    else:
-                        result = {
-                            'total_allocated': total_allocated,
-                            'is_within_budget': is_within_budget,
-                            'validated_allocations': allocations_list
-                        }
+                    result = {
+                        'total_allocated': total_allocated,
+                        'is_within_budget': is_within_budget,
+                        'validated_allocations': validated_allocations
+                    }
 
                     return json.dumps(result)
                 except json.JSONDecodeError as e:
@@ -224,63 +213,68 @@ class DebtRepayment:
                 except Exception as e:
                     return json.dumps({"error": "An error occurred", "details": str(e), "input": allocations})
 
-            def debt_investment_optimizer(debt_amount, interest_rate, expected_stock_return, multiplier_score, available_funds, min_payment):
+            def debt_investment_optimizer(debts, available_funds, expected_stock_return, multiplier_scores, stock_data):
                 """
-                Optimizes the allocation of available funds between debt repayment and stock investment.
+                Optimizes the allocation of available funds between debt repayment and stock investment across multiple debts.
 
                 Args:
-                    debt_amount (float): The outstanding debt amount.
-                    interest_rate (float): The annual interest rate on the debt.
-                    expected_stock_return (float): The expected annual rate of return on the stock investment.
-                    multiplier_score (float): A value representing the impact of debt on factors like credit score.
-                    available_funds (float): The total amount available for debt repayment and stock investment.
-                    min_payment (float): The minimum required payment for the debt.
+                    debts (list of dict): Debts with 'debt_name', 'debt_amount', 'interest_rate', and 'min_payment'.
+                    available_funds (float): Total funds available.
+                    expected_stock_return (float): Expected annual rate of return on stocks.
+                    multiplier_scores (dict): Impact multipliers for each debt.
 
                 Returns:
-                    dict: A dictionary with the optimal allocation, including:
-                        - 'debt_payment_amount': Amount allocated towards debt repayment.
-                        - 'investment_amount': Amount allocated to stock investment.
-                        - 'debt_repayment_period': Number of years to repay the debt.
-                        - 'total_wealth': Total wealth after the debt repayment period, considering debt and investment returns.
+                    dict: Optimal allocation with 'debt_payments', 'investment_amount', and 'total_wealth'.
                 """
-                min_payment = max(min_payment, 50)  
-                optimal_payment = min_payment
                 max_wealth = -float('inf')
+                optimal_payments = {
+                    'debt_payments': [],
+                    'investment_amount': 0,
+                    'total_wealth': -float('inf'),
+                }
 
-                def total_wealth(payment_amount):
-                    if payment_amount == 0:
-                        return -float('inf')
+                def total_wealth(payment_amounts):
+                    remaining_funds = available_funds
+                    investment_amount = max(0.1 * available_funds, available_funds - sum(payment_amounts))
+                    total_remaining_debt = 0
+                    for debt, payment_amount in zip(debts, payment_amounts):
+                        debt_amount = debt['debt_amount']
+                        interest_rate = debt['interest_rate']
+                        multiplier_score = multiplier_scores.get(debt['debt_name'], 0.1)
+                        min_payment = max(payment_amount, debt.get('min_payment', 0))
+                        remaining_funds -= min_payment
+                        if interest_rate == 0:
+                            remaining_debt = debt_amount * (1 + multiplier_score)
+                        else:
+                            remaining_debt = debt_amount * (1 + interest_rate) ** 100 * (1 + multiplier_score)
+                        total_remaining_debt += remaining_debt
+                    stock_returns = investment_amount * (1 + expected_stock_return) ** 100
+                    total_wealth = stock_returns - total_remaining_debt
+                    return total_wealth, investment_amount
 
-                    debt_repayment_period = np.ceil(debt_amount / payment_amount)
-                    investment_amount = available_funds - payment_amount
-                    max_period = min(debt_repayment_period, 100)
-                    stock_returns = investment_amount * (1 + expected_stock_return) ** max_period
-
-                    if interest_rate == 0:
-                        remaining_debt = debt_amount * (1 + multiplier_score) 
-                    else:
-                        remaining_debt = debt_amount * (1 + interest_rate) ** max_period * (1 + multiplier_score)
-                    
-                    return stock_returns - remaining_debt
-
-                for payment_amount in np.arange(min_payment, available_funds + 1, 20): 
-                    wealth = total_wealth(payment_amount)
+                max_payment = int(available_funds / len(debts))
+                payment_ranges = [range(int(debt.get('min_payment', 0)), max_payment + 1, 20) for debt in debts]
+                for payment_amounts in product(*payment_ranges):
+                    wealth, investment_amount = total_wealth(payment_amounts)
                     if wealth > max_wealth:
                         max_wealth = wealth
-                        optimal_payment = payment_amount
+                        optimal_payments = {
+                            'debt_payments': [{'debt_name': debt['debt_name'], 'payment_amount': amount}
+                                            for debt, amount in zip(debts, payment_amounts)],
+                            'investment_amount': investment_amount,
+                            'total_wealth': wealth,
+                            'stock_investments': []
+                        }
 
-                debt_repayment_period = np.ceil(debt_amount / optimal_payment)
-                investment_amount = available_funds - optimal_payment
+                if optimal_payments['investment_amount'] > 0:
+                    total_return = sum(stock['average_return'] for stock in stock_data)
+                    optimal_investments = [{'stock_name': stock['name'], 'investment_amount': (stock['average_return'] / total_return) * optimal_payments['investment_amount']} for stock in stock_data]
+                    optimal_payments['stock_investments'] = optimal_investments
 
-                return json.dumps({
-                    "debt_payment_amount": optimal_payment,
-                    "investment_amount": investment_amount,
-                    "debt_repayment_period": int(debt_repayment_period),
-                    "total_wealth": max_wealth
-                })
+                return optimal_payments
 
             @tool
-            def initial_payment_allocator(debts, available_funds, expected_stock_return, multiplier_scores):
+            def initial_payment_allocator(debts, available_funds, expected_stock_return, multiplier_scores, stock_data):
                 """
                 Allocates minimum payments first, then uses the remaining funds to optimize debt repayment and stock investments.
 
@@ -294,72 +288,42 @@ class DebtRepayment:
                     dict: Optimal allocation with 'debt_payments', 'investment_amount', and 'total_wealth'.
                 """
                 debt_payments = []
-                total_min_payments = 0
-
-                print(f"Debts: {debts}")
-                print(f"Available Funds: {available_funds}")
-                print(f"Expected Stock Return: {expected_stock_return}")
-                print(f"Multiplier Scores: {multiplier_scores}")
-
-                # Calculate total minimum payments
                 for debt in debts:
-                    min_payment = debt.get('min_payment', 50) 
-                    if min_payment is None or min_payment == 0:
-                        min_payment = 50
-                    if isinstance(min_payment, (int, float)):
-                        total_min_payments += min_payment
-                    else:
-                        raise ValueError(f"Invalid min_payment for debt {debt['debt_name']}: {min_payment}")
-
-                # Ensure available funds cover the minimum payments
-                if available_funds < total_min_payments:
-                    raise ValueError("Available funds are less than the total minimum payments required")
-
-                remaining_funds = available_funds - total_min_payments
-                
-                # Distribute minimum payments
-                for debt in debts:
-                    min_payment = debt.get('min_payment', 50)  
-                    if min_payment is None or min_payment == 0:
-                        min_payment = 50
-                    debt_payments.append({'debt_name': debt['debt_name'], 'payment_amount': min_payment})
-                
-                print(f"Debt Payments: {debt_payments}")
-                print(f"Remaining Funds: {remaining_funds}")
-
-                optimal_payments = {
-                    'debt_payments': debt_payments,
-                    'investment_amount': 0,
-                    'total_wealth': -float('inf')
-                }
-                max_wealth = -float('inf')
-                
-                for debt in debts:
-                    debt_name = debt['debt_name']
+                    min_payment = debt.get('min_payment', None)
                     debt_amount = debt['debt_amount']
-                    interest_rate = debt['interest_rate']
-                    min_payment = debt.get('min_payment', 50)  
                     if min_payment is None or min_payment == 0:
-                        min_payment = 50
-                    multiplier_score = multiplier_scores.get(debt_name, 0.1) 
+                        if debt_amount > 10000:
+                            min_payment_percentage = 0.01 + (0.03 * (1 - expected_stock_return / 0.2))
+                            min_payment_percentage = max(0.01, min(0.04, min_payment_percentage))
+                        else:
+                            min_payment_percentage = 0.02 + (0.08 * (1 - expected_stock_return / 0.2))
+                            min_payment_percentage = max(0.02, min(0.1, min_payment_percentage))
+                        min_payment = min_payment_percentage * debt_amount
+                    debt_payments.append({'debt_name': debt['debt_name'], 'payment_amount': min_payment})
 
-                    if not isinstance(min_payment, (int, float)):
-                        raise ValueError(f"Invalid min_payment for debt {debt_name}: {min_payment}")
-                    
-                    result_json = debt_investment_optimizer(debt_amount, interest_rate, expected_stock_return, multiplier_score, remaining_funds, min_payment)
-                    result = json.loads(result_json)
+                remaining_funds = available_funds - sum(payment['payment_amount'] for payment in debt_payments)
 
-                    print(f"Result for {debt_name}: {result}")
-                      
-                    if result['total_wealth'] > max_wealth:
-                        max_wealth = result['total_wealth']
-                        optimal_payments = {
-                            'debt_payments': debt_payments + [{'debt_name': debt_name, 'payment_amount': result['debt_payment_amount']}],
-                            'investment_amount': result['investment_amount'],
-                            'total_wealth': result['total_wealth']
-                        }
-                        
-                print(f"Optimal Payments: {optimal_payments}")
+                optimal_payments = debt_investment_optimizer(debts, remaining_funds, expected_stock_return, multiplier_scores, stock_data)
+                optimal_payments['debt_payments'] += debt_payments
+
+                total_allocated = sum(payment['payment_amount'] for payment in optimal_payments['debt_payments']) + optimal_payments['investment_amount']
+                if total_allocated > available_funds:
+                    remaining_budget = available_funds
+                    adjusted_payments = []
+                    sorted_debts = sorted(debts, key=lambda d: d['interest_rate'] * (1 + multiplier_scores.get(d['debt_name'], 0.1)), reverse=True)
+                    for debt in sorted_debts:
+                        debt_name = debt['debt_name']
+                        payment_amount = next((p['payment_amount'] for p in optimal_payments['debt_payments'] if p['debt_name'] == debt_name), 0)
+                        if remaining_budget >= payment_amount:
+                            adjusted_payments.append({'debt_name': debt_name, 'payment_amount': payment_amount})
+                            remaining_budget -= payment_amount
+                        else:
+                            adjusted_payments.append({'debt_name': debt_name, 'payment_amount': remaining_budget})
+                            remaining_budget = 0
+                            break
+                    optimal_payments['debt_payments'] = adjusted_payments
+                    optimal_payments['investment_amount'] = remaining_budget
+
                 return optimal_payments
 
             fetch_debt_str = json.dumps(fetch_debt)
@@ -407,11 +371,15 @@ class DebtRepayment:
 
                 6. **Allocate Initial Payments**:
                 - Use the `initial_payment_allocator` tool to allocate the minimum payments first and use the remaining funds to maximize wealth.
+                - The minimum payment for debts with no specified minimum will be set between 5% and 15% of the debt amount, based on the expected stock returns.
                 - Pass the list of debts, available budget ($2000), expected stock return, and multiplier scores as arguments to the tool.
-                - The tool will return the optimal debt payment amounts, investment amount, and total wealth.
+                - The tool will use the `debt_investment_optimizer` function to determine the optimal debt payment amounts and investment amount that maximize the total wealth.
+                - At least 10% of the available funds should be allocated towards stock investments, unless the expected stock returns are significantly lower than the debt interest rates.
+                - The allocations should not exceed the available budget of $2000.
 
                 7. **Make Recommendations**:
                 - Based on the results from the `initial_payment_allocator` tool, determine the specific amounts to allocate towards each debt and stock investment.
+                - Prioritize growing net worth while maintaining a good credit score.
                 - Provide a detailed analysis with specific amounts to allocate towards each debt and how much to invest in stocks. List 1-3 top-performing stocks to invest in and specify the exact amount to invest in each.
                 - Ensure the minimum required payments for each debt are met before allocating any additional funds.
                 - Indicate if partial payments are made for lower-priority debts due to budget limitations.
@@ -454,7 +422,3 @@ class DebtRepayment:
                 logger.error(f"Error running agent: {e}")
                 raise e
         
-
-
-
-# he calculated weighting of importance for each debt, comparing the time value of the debt compared with different stock investments and any other considerations relevant.
