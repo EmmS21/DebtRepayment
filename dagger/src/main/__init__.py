@@ -99,26 +99,6 @@ class DebtRepayment:
         return json.dumps(data_json)
     
     async def run_agent(self, open_key, serpapi_key, fred_str, fetch_debt, redis_client) -> str:
-            SERPAPI_API_KEY = await serpapi_key.plaintext()
-            @tool
-            def serp_search(query: str) -> str:
-                """Searches for information using SerpAPI."""
-                try:
-                    cached_result = redis_client.get(query)
-                    if cached_result:
-                        return cached_result.decode('utf-8')
-                    serp = SerpAPIWrapper(serpapi_api_key=SERPAPI_API_KEY)
-                    response = serp.run(query)
-                    if isinstance(response, (list, dict)):
-                        response = json.dumps(response)
-                    redis_client.set(query, response)
-                    return response
-                except Exception as e:
-                    cached_result = redis_client.get(query)
-                    if cached_result:
-                        return cached_result.decode('utf-8')
-                    else:
-                        return "No cached result available"
             @tool  
             async def fetch_stocks(sectors_of_interest:str) -> str:
                 """Fetches stock data for given sectors."""
@@ -130,21 +110,21 @@ class DebtRepayment:
                 """Calculate the future value of an amount of money over a period with a given rate."""
                 future_value = await dag.calculate_time_value().calculate(period, amount, rate, fred_str)
                 return json.dumps(future_value)
-
+            
             @tool
-            def credit_impact_multiplier(debt_type, credit_score_impact, legal_ramifications, base_interest_rate):
+            def credit_impact_multiplier(debt_type_list, credit_score_impact_list, legal_ramifications_list, base_interest_rate_list):
                 """
-                Function to adjust the interest rate of a debt based on its type, impact on credit score,
+                Function to adjust the interest rate of a list of debts based on their types, impacts on credit score,
                 and legal ramifications of missing payments.
 
                 Parameters:
-                - debt_type (str): The type of debt (e.g., 'Credit Card', 'Tax Loan', 'Consumer Debt', 'Student Debt', 'Government Debt').
-                - credit_score_impact (str): The impact of this debt on the credit score (e.g., 'high', 'medium', 'low').
-                - legal_ramifications (str): The legal consequences of missing payments for this debt (e.g., 'severe', 'moderate', 'minor').
-                - base_interest_rate (float): The base annual interest rate on the debt.
+                - debt_type (list): List of debt types (e.g., ['Credit Card', 'Tax Loan', 'Consumer Debt']).
+                - credit_score_impact_list (list): List of credit score impacts (e.g., ['high', 'medium', 'low']).
+                - legal_ramifications_list (list): List of legal ramifications (e.g., ['severe', 'moderate', 'minor']).
+                - base_interest_rate_list (list): List of base annual interest rates on the debts.
 
                 Returns:
-                - adjusted_interest_rate (float): The adjusted interest rate based on the provided information.
+                - list: List of dictionaries with adjusted interest rates for each debt.
                 """
                 debt_weights = {
                     'Credit Card': {'credit_score_weight': 0.7, 'legal_weight': 0.6},
@@ -154,25 +134,28 @@ class DebtRepayment:
                     'Government Debt': {'credit_score_weight': 0.3, 'legal_weight': 0.8}
                 }
                 impact_values = {
-                    'high': 0.8,
-                    'medium': 0.5,
+                    'high': 0.6,
+                    'medium': 0.45,
                     'low': 0.2
                 }
                 legal_values = {
-                    'severe': 0.7,
-                    'moderate': 0.4,
+                    'severe': 0.6,
+                    'moderate': 0.3,
                     'minor': 0.1
                 }
-                weights = debt_weights.get(debt_type, {'credit_score_weight': 0.5, 'legal_weight': 0.5})
-                credit_score_value = impact_values.get(credit_score_impact.lower(), 0.0)
-                legal_value = legal_values.get(legal_ramifications.lower(), 0.0)
-                multiplier = (credit_score_value * weights['credit_score_weight']) + (legal_value * weights['legal_weight'])
-                if base_interest_rate == 0:
-                    adjusted_interest_rate = base_interest_rate * (1 + multiplier)
-                else:
-                    adjusted_interest_rate = base_interest_rate * (1 + multiplier / 2)
-                    
-                return {"adjusted_interest_rate": adjusted_interest_rate}
+
+                results = []
+                for debt_type, credit_score_impact, legal_ramifications, base_interest_rate in zip(debt_type_list, credit_score_impact_list, legal_ramifications_list, base_interest_rate_list):
+                    weights = debt_weights.get(debt_type, {'credit_score_weight': 0.5, 'legal_weight': 0.5})
+                    credit_score_value = impact_values.get(credit_score_impact.lower(), 0.0)
+                    legal_value = legal_values.get(legal_ramifications.lower(), 0.0)
+                    multiplier = (credit_score_value * weights['credit_score_weight']) + (legal_value * weights['legal_weight'])
+                    if base_interest_rate == 0:
+                        adjusted_interest_rate = base_interest_rate * (1 + multiplier)
+                    else:
+                        adjusted_interest_rate = base_interest_rate * (1 + multiplier / 2)
+                    results.append({"debt_type": debt_type, "adjusted_interest_rate": adjusted_interest_rate})
+                return results            
             
             @tool
             async def validate_allocations(allocations: str, budget: float = 2000.0) -> str:
@@ -222,38 +205,45 @@ class DebtRepayment:
                     available_funds (float): Total funds available.
                     expected_stock_return (float): Expected annual rate of return on stocks.
                     multiplier_scores (dict): Impact multipliers for each debt.
+                    stock_data (list of dict): A list of dictionaries representing various stock options available for investment.
 
                 Returns:
                     dict: Optimal allocation with 'debt_payments', 'investment_amount', and 'total_wealth'.
                 """
+                def calculate_future_value(amount: float, rate: float, periods: int) -> float:
+                    """Calculate the future value of an amount of money over a period with a given rate."""
+                    return amount * ((1 + rate / 12) ** periods)
+
                 max_wealth = -float('inf')
                 optimal_payments = {
                     'debt_payments': [],
                     'investment_amount': 0,
-                    'total_wealth': -float('inf'),
+                    'total_wealth': -float('inf')
                 }
 
                 def total_wealth(payment_amounts):
-                    remaining_funds = available_funds
-                    investment_amount = max(0.1 * available_funds, available_funds - sum(payment_amounts))
+                    remaining_funds = float(available_funds) if available_funds is not None else 0.0                    
+                    investment_amount = max(0.1 * remaining_funds, remaining_funds - sum(float(p or 0) for p in payment_amounts))
+                    
                     total_remaining_debt = 0
                     for debt, payment_amount in zip(debts, payment_amounts):
-                        debt_amount = debt['debt_amount']
-                        interest_rate = debt['interest_rate']
+                        debt_amount = float(debt['debt_amount']) if debt['debt_amount'] is not None else 0.0
+                        interest_rate = float(debt['interest_rate']) if debt['interest_rate'] is not None else 0.0
+                        
                         multiplier_score = multiplier_scores.get(debt['debt_name'], 0.1)
-                        min_payment = max(payment_amount, debt.get('min_payment', 0))
+                        min_payment = max(float(payment_amount or 0), float(debt.get('min_payment', 0) or 0))
                         remaining_funds -= min_payment
                         if interest_rate == 0:
                             remaining_debt = debt_amount * (1 + multiplier_score)
                         else:
                             remaining_debt = debt_amount * (1 + interest_rate) ** 100 * (1 + multiplier_score)
                         total_remaining_debt += remaining_debt
-                    stock_returns = investment_amount * (1 + expected_stock_return) ** 100
+                    stock_returns = calculate_future_value(investment_amount, expected_stock_return, 100 * 12)
                     total_wealth = stock_returns - total_remaining_debt
                     return total_wealth, investment_amount
 
-                max_payment = int(available_funds / len(debts))
-                payment_ranges = [range(int(debt.get('min_payment', 0)), max_payment + 1, 20) for debt in debts]
+                max_payment = int(float(available_funds) / len(debts)) if available_funds is not None else 0
+                payment_ranges = [range(int(float(debt.get('min_payment', 0) or 0)), max_payment + 1, 20) for debt in debts]
                 for payment_amounts in product(*payment_ranges):
                     wealth, investment_amount = total_wealth(payment_amounts)
                     if wealth > max_wealth:
@@ -266,9 +256,10 @@ class DebtRepayment:
                             'stock_investments': []
                         }
 
-                if optimal_payments['investment_amount'] > 0:
-                    total_return = sum(stock['average_return'] for stock in stock_data)
-                    optimal_investments = [{'stock_name': stock['name'], 'investment_amount': (stock['average_return'] / total_return) * optimal_payments['investment_amount']} for stock in stock_data]
+                remaining_funds = available_funds - sum(payment['payment_amount'] for payment in optimal_payments['debt_payments'])
+                if remaining_funds > 0:
+                    total_return = sum(float(stock['average_return'] or 0) for stock in stock_data)
+                    optimal_investments = [{'stock_name': stock['name'], 'investment_amount': (float(stock.get('average_return', 0)) / total_return) * remaining_funds} for stock in stock_data if 'name' in stock and 'average_return' in stock]
                     optimal_payments['stock_investments'] = optimal_investments
 
                 return optimal_payments
@@ -280,9 +271,10 @@ class DebtRepayment:
 
                 Args:
                     debts (list of dict): Debts with 'debt_name', 'debt_amount', 'interest_rate', and 'min_payment'.
-                    available_funds (float): Total funds available.
-                    expected_stock_return (float): Expected annual return on stocks.
-                    multiplier_scores (dict): Impact multipliers for each debt.
+                    available_funds (float): Total amount of money currently available for allocation towards debts and investments.
+                    expected_stock_return (float): Anticipated annual rate of return on investments made into stocks, expressed as a percentage.
+                    multiplier_scores (dict): Dictionary mapping each debt_name to a multiplier that adjusts the interest rate based on external factors (e.g., credit score impact, legal ramifications).
+                    stock_data (list of dict): A list of dictionaries representing various stock options available for investment.
 
                 Returns:
                     dict: Optimal allocation with 'debt_payments', 'investment_amount', and 'total_wealth'.
@@ -290,27 +282,27 @@ class DebtRepayment:
                 debt_payments = []
                 for debt in debts:
                     min_payment = debt.get('min_payment', None)
-                    debt_amount = debt['debt_amount']
+                    debt_amount = float(debt['debt_amount'] or 0)
                     if min_payment is None or min_payment == 0:
                         if debt_amount > 10000:
-                            min_payment_percentage = 0.01 + (0.03 * (1 - expected_stock_return / 0.2))
+                            min_payment_percentage = 0.01 + (0.03 * (1 - float(expected_stock_return) / 0.2))
                             min_payment_percentage = max(0.01, min(0.04, min_payment_percentage))
                         else:
-                            min_payment_percentage = 0.02 + (0.08 * (1 - expected_stock_return / 0.2))
+                            min_payment_percentage = 0.02 + (0.08 * (1 - float(expected_stock_return) / 0.2))
                             min_payment_percentage = max(0.02, min(0.1, min_payment_percentage))
                         min_payment = min_payment_percentage * debt_amount
-                    debt_payments.append({'debt_name': debt['debt_name'], 'payment_amount': min_payment})
+                    debt_payments.append({'debt_name': debt['debt_name'], 'payment_amount': float(min_payment or 0)})
 
-                remaining_funds = available_funds - sum(payment['payment_amount'] for payment in debt_payments)
+                remaining_funds = float(available_funds) - sum(payment['payment_amount'] for payment in debt_payments)
 
-                optimal_payments = debt_investment_optimizer(debts, remaining_funds, expected_stock_return, multiplier_scores, stock_data)
+                optimal_payments = debt_investment_optimizer(debts, remaining_funds, float(expected_stock_return), multiplier_scores, stock_data)
                 optimal_payments['debt_payments'] += debt_payments
 
                 total_allocated = sum(payment['payment_amount'] for payment in optimal_payments['debt_payments']) + optimal_payments['investment_amount']
-                if total_allocated > available_funds:
-                    remaining_budget = available_funds
+                if total_allocated > float(available_funds):
+                    remaining_budget = float(available_funds)
                     adjusted_payments = []
-                    sorted_debts = sorted(debts, key=lambda d: d['interest_rate'] * (1 + multiplier_scores.get(d['debt_name'], 0.1)), reverse=True)
+                    sorted_debts = sorted(debts, key=lambda d: float(d['interest_rate']) * (1 + multiplier_scores.get(d['debt_name'], 0.1)), reverse=True)
                     for debt in sorted_debts:
                         debt_name = debt['debt_name']
                         payment_amount = next((p['payment_amount'] for p in optimal_payments['debt_payments'] if p['debt_name'] == debt_name), 0)
@@ -323,7 +315,6 @@ class DebtRepayment:
                             break
                     optimal_payments['debt_payments'] = adjusted_payments
                     optimal_payments['investment_amount'] = remaining_budget
-
                 return optimal_payments
 
             fetch_debt_str = json.dumps(fetch_debt)
@@ -349,39 +340,38 @@ class DebtRepayment:
                         ("system", """You are an autonmous financial planner. Your goal is to analyze the given stock and debt data to suggest an optimal payment plan for debt repayment and stock purchases for a single month assuming a balance of $2000.
 
                 Instructions:
-                1. **Search Debt Information**:
-                - Use the `serp_search` tool with SerpAPI to find detailed information about each debt type.
-                - Gather contextual information that helps determine the impact of each debt on the credit score, legal ramifications of missing payments, and other relevant factors.
-
-                2. **Classify Information**:
-                - Based on the gathered information, classify the impact on the credit score as 'high', 'medium', or 'low' and the legal ramifications as 'severe', 'moderate', or 'minor'.
+                1. **Classify Information**:
+                - Based on the information available, classify the impact on the credit score as 'high', 'medium', or 'low' and the legal ramifications as 'severe', 'moderate', or 'minor'.
                 - These classifications should be derived from the textual information obtained from the search results.
 
-                3. **Adjust Interest Rates**:
+                2. **Adjust Interest Rates**:
                 - Use the `credit_impact_multiplier` tool to adjust the interest rate for each debt based on the classifications and the base interest rate.
                 - The adjusted interest rate will reflect the combined impact on the credit score and legal ramifications.
 
-                4. **Retrieve Stock Data**:
+                3. **Retrieve Stock Data**:
                 - Use the `fetch_stocks` tool to get performance data for top stocks in Health Care, Information Technology, Financials, and Energy sectors.
                 - Record the average returns and current prices of these top stocks.
 
-                5. **Calculate Future Values**:
+                4. **Calculate Future Values**:
                 - Use the `calculate_time_value` tool to calculate the future values of potential stock investments over a sensible time period (e.g., maximum time to pay back debt).
                 - Calculate the future value of each debt given the interest rates.
 
-                6. **Allocate Initial Payments**:
-                - Use the `initial_payment_allocator` tool to allocate the minimum payments first and use the remaining funds to maximize wealth.
-                - The minimum payment for debts with no specified minimum will be set between 5% and 15% of the debt amount, based on the expected stock returns.
-                - Pass the list of debts, available budget ($2000), expected stock return, and multiplier scores as arguments to the tool.
-                - The tool will use the `debt_investment_optimizer` function to determine the optimal debt payment amounts and investment amount that maximize the total wealth.
-                - At least 10% of the available funds should be allocated towards stock investments, unless the expected stock returns are significantly lower than the debt interest rates.
-                - The allocations should not exceed the available budget of $2000.
+                5. **Allocate Initial Payments**:
+                - Use the `initial_payment_allocator` tool to allocate the minimum payments first for all debts.
+                - For debts without specified minimum payments, set the payment between 5% and 15% of the debt amount, based on expected stock returns.
+                         
+                6. **Debt Investment Optimization**:
+                - Use the `debt_investment_optimizer` tool to compare the returns from stock investments with the savings from additional debt repayments.
+                - Dynamically allocate remaining funds to either high-interest debts or high-return investments based on this comparison, ensuring the total stays within the budget.
 
-                7. **Make Recommendations**:
-                - Based on the results from the `initial_payment_allocator` tool, determine the specific amounts to allocate towards each debt and stock investment.
+                7. **Validate Allocations**:
+                - Use the `validate_allocations` tool to ensure that the total allocations do not exceed the available budget of $2000.
+
+                8. **Make Recommendations**:
+                - Based on the results from the `initial_payment_allocator` and `debt_investment_optimizer` tools, determine the specific amounts to allocate towards each debt and stock investment. List two top-performing stocks to invest in and specify the exact amount to invest in each, including the average return, current price, and projected value of the investment over 2 years.
                 - Prioritize growing net worth while maintaining a good credit score.
                 - Provide a detailed analysis with specific amounts to allocate towards each debt and how much to invest in stocks. List 1-3 top-performing stocks to invest in and specify the exact amount to invest in each.
-                - Ensure the minimum required payments for each debt are met before allocating any additional funds.
+                - Ensure the minimum required payments for each debt are met before allocating any additional funds. Allocate at least 10% of the available funds towards stock investments.
                 - Indicate if partial payments are made for lower-priority debts due to budget limitations.
 
                 Output:
@@ -397,14 +387,14 @@ class DebtRepayment:
                         MessagesPlaceholder("agent_scratchpad")
                     ]
                 )
-                toolkit = [fetch_stocks, calculate_time_value, serp_search, credit_impact_multiplier, initial_payment_allocator, validate_allocations] 
+                toolkit = [fetch_stocks, calculate_time_value, credit_impact_multiplier, initial_payment_allocator, validate_allocations] 
                 agent = create_openai_tools_agent(llm, toolkit, simple_prompt_template)
                 agent_executor = AgentExecutor(
                                                agent=agent, 
                                                tools=toolkit, 
                                                verbose=True,
                                                handle_parsing_errors=True,
-                                               max_iterations=70,
+                                               max_iterations=25,
                                                max_execution_time=180
                                 )
 
