@@ -5,20 +5,29 @@ from langchain.agents import AgentExecutor, create_openai_tools_agent
 from langchain.tools import tool
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
-from langchain_community.utilities import SerpAPIWrapper
 import re
 import redis
-import numpy as np
 from langchain.globals import set_debug
 from itertools import product
+import requests
+from typing import List
+from langchain_core.pydantic_v1 import BaseModel
+from typing import List, Dict, Any
+from langchain.output_parsers.pydantic import PydanticOutputParser
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+@object_type 
+class RepaymentPlan(BaseModel):
+    debts: List[Dict[str, Any]]
+    investments: List[Dict[str, Any]]
+    rationale: str
+
 @object_type
 class DebtRepayment:
     @function
-    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, fred_str: Secret, serpapi_key: Secret, name: str) -> str:
+    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, fred_str: Secret, google_key: Secret, search_engine_id: Secret, name: str) -> str:
         """Returns a container that echoes whatever string argument is provided"""
         REDIS_HOST = 'guided-sawfish-54202.upstash.io'
         REDIS_PORT = 6379
@@ -37,7 +46,7 @@ class DebtRepayment:
         fetch_balance = self.convert_amounts(fetch_balance)
         fetch_debt = await dag.fetch_spreadsheet_data().fetch_data(apiKey, sheet_two, name)
         fetch_debt = self.restructure_data(fetch_debt)
-        decision = await self.run_agent(open_key, serpapi_key, fred_str, fetch_debt, redis_client)        
+        decision = await self.run_agent(open_key, google_key, search_engine_id, fred_str, fetch_debt, redis_client)        
         output = decision.get("decision", {}).get("output", "")
         clean_decision = re.sub(r'\\n', ' ', output)
         return clean_decision
@@ -98,7 +107,49 @@ class DebtRepayment:
                 row['Amount'] = self.clean_amount(row['Amount'])
         return json.dumps(data_json)
     
-    async def run_agent(self, open_key, serpapi_key, fred_str, fetch_debt, redis_client) -> str:
+    async def run_agent(self, open_key, google_key, search_engine_id, fred_str, fetch_debt, redis_client) -> str:
+            @tool
+            async def search_debts(debts: List[List], query: str) -> str:
+                """
+                Search for information about debts using the Google Custom Search Engine API.
+
+                Args:
+                    debts (List[List]): A list of lists where each inner list represents a row of data about debts.
+                    query (str): The query string to use for the search.
+
+                Returns:
+                    str: A JSON string containing the search results for each debt.
+                """
+                api_key = await google_key.plaintext()
+                engine_id =  await search_engine_id.plaintext()
+                debt_names = debts[0][1:]
+                debt_amounts = debts[1][1:]
+                debt_min_payments = debts[2][1:]
+                debt_interest_rates = debts[3][1:]
+                
+                search_results = {}
+
+                for debt_name, debt_amount, debt_min_payment, debt_interest_rate in zip(debt_names, debt_amounts, debt_min_payments, debt_interest_rates):
+                    full_query = f"{query} {debt_name}"
+                    url = f"https://www.googleapis.com/customsearch/v1?key={api_key}&cx={engine_id}&q={full_query}"
+                    response = requests.get(url)
+                    if response.status_code == 200:
+                        search_results[debt_name] = {
+                            'debt_amount': debt_amount,
+                            'debt_min_payment': debt_min_payment,
+                            'debt_interest_rate': debt_interest_rate,
+                            'search_results': response.json()['items']
+                        }
+                        redis_client.set(f"debt_info:{debt_name}", response.content)
+                    else:
+                        search_results[debt_name] = {
+                            'debt_amount': debt_amount,
+                            'debt_min_payment': debt_min_payment,
+                            'debt_interest_rate': debt_interest_rate,
+                            'search_results': []
+                        }
+                return json.dumps(search_results)
+
             @tool  
             async def fetch_stocks(sectors_of_interest:str) -> str:
                 """Fetches stock data for given sectors."""
@@ -108,7 +159,8 @@ class DebtRepayment:
             @tool
             async def calculate_time_value(period: int, amount: str, rate: str) -> str:
                 """Calculate the future value of an amount of money over a period with a given rate."""
-                future_value = await dag.calculate_time_value().calculate(period, amount, rate, fred_str)
+                cleaned_amount = re.sub(r'[$]', '', amount)
+                future_value = await dag.calculate_time_value().calculate(period, cleaned_amount, rate, fred_str)
                 return json.dumps(future_value)
             
             @tool
@@ -335,39 +387,46 @@ class DebtRepayment:
                 logger.error(f"Error retrieving OpenAI key: {e}")
                 raise e
             try:
+                repayment_parser = PydanticOutputParser(pydantic_object=RepaymentPlan)
+
                 simple_prompt_template = ChatPromptTemplate.from_messages(
                     [
                         ("system", """You are an autonmous financial planner. Your goal is to analyze the given stock and debt data to suggest an optimal payment plan for debt repayment and stock purchases for a single month assuming a balance of $2000.
 
-                Instructions:
-                1. **Classify Information**:
+                Instructions:                
+                1. **Gather Debt Information**:
+                - Construct a search query string based on the information you need to gather about each debt (e.g., "credit score impact legal ramifications").
+                - Use the `search_debts` tool, providing the list of debts (including both the debt name and debt type), the constructed query string, your Google Custom Search Engine API key, and the ID of your custom search engine.
+                - Store the search results in Redis for future reuse.   
+                                               
+                2. **Classify Information**:
                 - Based on the information available, classify the impact on the credit score as 'high', 'medium', or 'low' and the legal ramifications as 'severe', 'moderate', or 'minor'.
                 - These classifications should be derived from the textual information obtained from the search results.
 
-                2. **Adjust Interest Rates**:
+                3. **Adjust Interest Rates**:
                 - Use the `credit_impact_multiplier` tool to adjust the interest rate for each debt based on the classifications and the base interest rate.
                 - The adjusted interest rate will reflect the combined impact on the credit score and legal ramifications.
 
-                3. **Retrieve Stock Data**:
+                4. **Retrieve Stock Data**:
                 - Use the `fetch_stocks` tool to get performance data for top stocks in Health Care, Information Technology, Financials, and Energy sectors.
                 - Record the average returns and current prices of these top stocks.
 
-                4. **Calculate Future Values**:
+                5. **Calculate Future Values**:
                 - Use the `calculate_time_value` tool to calculate the future values of potential stock investments over a sensible time period (e.g., maximum time to pay back debt).
                 - Calculate the future value of each debt given the interest rates.
 
-                5. **Allocate Initial Payments**:
+                6. **Allocate Initial Payments**:
                 - Use the `initial_payment_allocator` tool to allocate the minimum payments first for all debts.
                 - For debts without specified minimum payments, set the payment between 5% and 15% of the debt amount, based on expected stock returns.
                          
-                6. **Debt Investment Optimization**:
+                7. **Debt Investment Optimization**:
                 - Use the `debt_investment_optimizer` tool to compare the returns from stock investments with the savings from additional debt repayments.
                 - Dynamically allocate remaining funds to either high-interest debts or high-return investments based on this comparison, ensuring the total stays within the budget.
 
-                7. **Validate Allocations**:
+                8. **Validate Allocations**:
                 - Use the `validate_allocations` tool to ensure that the total allocations do not exceed the available budget of $2000.
 
-                8. **Make Recommendations**:
+                9. **Make Recommendations**:
                 - Based on the results from the `initial_payment_allocator` and `debt_investment_optimizer` tools, determine the specific amounts to allocate towards each debt and stock investment. List two top-performing stocks to invest in and specify the exact amount to invest in each, including the average return, current price, and projected value of the investment over 2 years.
                 - Prioritize growing net worth while maintaining a good credit score.
                 - Provide a detailed analysis with specific amounts to allocate towards each debt and how much to invest in stocks. List 1-3 top-performing stocks to invest in and specify the exact amount to invest in each.
@@ -387,7 +446,7 @@ class DebtRepayment:
                         MessagesPlaceholder("agent_scratchpad")
                     ]
                 )
-                toolkit = [fetch_stocks, calculate_time_value, credit_impact_multiplier, initial_payment_allocator, validate_allocations] 
+                toolkit = [fetch_stocks, search_debts, calculate_time_value, credit_impact_multiplier, initial_payment_allocator, validate_allocations] 
                 agent = create_openai_tools_agent(llm, toolkit, simple_prompt_template)
                 agent_executor = AgentExecutor(
                                                agent=agent, 
@@ -407,7 +466,9 @@ class DebtRepayment:
                 set_debug(True)
                 result = await agent_executor.ainvoke(input_data)
                 logger.info(f"Final decision: {result}")
-                return {"decision": result, "agent_scratchpad": input_data["agent_scratchpad"]}
+                parsed_result = repayment_parser.parse(result["decision"]["output"])
+                return parsed_result.json()
+                # return {"decision": result, "agent_scratchpad": input_data["agent_scratchpad"]}
             except Exception as e:
                 logger.error(f"Error running agent: {e}")
                 raise e
