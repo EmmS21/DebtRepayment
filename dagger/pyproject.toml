@@ -1,9 +1,8 @@
 [project]
 name = "main"
 version = "0.0.0"
-dependencies = ["logging", "langchain", "langchain_openai", "google-search-results", "langchain_community", "redis", "requests"]
+dependencies = ["logging", "langchain", "langchain_openai", "google-search-results", "langchain_community", "redis", "requests", "plotly", "pandas", "kaleido"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
