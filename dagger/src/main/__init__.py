@@ -112,47 +112,46 @@ class DebtRepayment:
                 """
                 api_key = await google_key.plaintext()
                 engine_id =  await search_engine_id.plaintext()
-                debt_names = debts[0][1:]
-                debt_amounts = debts[1][1:]
-                debt_min_payments = debts[2][1:]
-                debt_interest_rates = debts[3][1:]
+
+                if not debts or not debts[0]:
+                    return json.dumps({"error": "Invalid input data"})
                 
+                debt_names = debts[0][1:]
+
                 search_results = {}
-
-                for debt_name, debt_amount, debt_min_payment, debt_interest_rate in zip(debt_names, debt_amounts, debt_min_payments, debt_interest_rates):
-                    cached_result = redis_client.get(f"debt_info:{debt_name}")
-                    if cached_result:
-                        search_results[debt_name] = json.loads(cached_result)
-                    else:
-                        full_query = f"{query} {debt_name}"
-                        url = f"https://www.googleapis.com/customsearch/v1?key={api_key}&cx={engine_id}&q={full_query}"
-                        response = requests.get(url)
-                        if response.status_code == 200:
-                            items = response.json().get('items', [])[:1]
-                            summarized_results = [
-                                {
-                                    'title': item.get('title'),
-                                    'snippet': item.get('snippet'),
-                                    'htmlSnippet': item.get('htmlSnippet')
-                                }
-                                for item in items
-                            ]
-                            print(f"Summarized Results for {debt_name}: {summarized_results}")  # Debugging statement
-
-                            search_results[debt_name] = {
-                                'debt_amount': debt_amount,
-                                'debt_min_payment': debt_min_payment,
-                                'debt_interest_rate': debt_interest_rate,
-                                'search_results': summarized_results
-                            }
-                            redis_client.set(f"debt_info:{debt_name}", json.dumps(search_results[debt_name]))
+                for debt_name in debt_names:
+                    try:
+                        cached_result = redis_client.get(f"debt_info:{debt_name}")
+                        if cached_result:
+                            search_results[debt_name] = json.loads(cached_result)
                         else:
-                            search_results[debt_name] = {
-                                'debt_amount': debt_amount,
-                                'debt_min_payment': debt_min_payment,
-                                'debt_interest_rate': debt_interest_rate,
-                                'search_results': []
-                            }
+                            full_query = f"{query} {debt_name}"
+                            url = f"https://www.googleapis.com/customsearch/v1?key={api_key}&cx={engine_id}&q={full_query}"
+                            response = requests.get(url)
+                            if response.status_code == 200:
+                                items = response.json().get('items', [])[:1]
+                                summarized_results = [
+                                    {
+                                        'title': item.get('title'),
+                                        'snippet': item.get('snippet'),
+                                        'htmlSnippet': item.get('htmlSnippet')
+                                    }
+                                    for item in items
+                                ]
+                                search_results[debt_name] = {
+                                    'search_results': summarized_results
+                                }
+                                redis_client.set(f"debt_info:{debt_name}", json.dumps(search_results[debt_name]))
+                            else:
+                                search_results[debt_name] = {
+                                    'search_results': []
+                                }
+                    except Exception as e:
+                        search_results[debt_name] = {
+                            'error': str(e),
+                            'search_results': []
+                        }
+
                 return json.dumps(search_results)
             
             @tool  
@@ -367,6 +366,8 @@ class DebtRepayment:
                 4. **Retrieve Stock Data**:
                 - Use the `fetch_stocks` tool to get performance data for top stocks in Health Care, Information Technology, Financials, and Energy sectors.
                 - Ensure the stock data uses the key `symbol` for stock identifiers. Record the average returns and current prices of these top stocks.
+                - The fetched data will be labeled as `stock_data`.
+
 
                 5. **Calculate Future Values**:
                 - Use the `calculate_time_value` tool to calculate the future values of potential stock investments over a sensible time period (e.g., maximum time to pay back debt).
