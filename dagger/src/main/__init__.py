@@ -249,6 +249,7 @@ class DebtRepayment:
                 stock_name = stock['symbol']
                 annual_return = float(stock['average_return'])
                 monthly_returns = stock['monthly_return']
+                #too many values error
                 sharpe_ratio, average_monthly_return = calculate_sharpe_ratio(monthly_returns, risk_free_rate_annual)
 
                 monthly_return = (1 + annual_return) ** (1/12) - 1
