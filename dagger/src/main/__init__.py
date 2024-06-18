@@ -10,7 +10,7 @@ import redis
 from langchain.globals import set_debug
 import requests
 from typing import List
-import plotly.express as px
+import plotly.graph_objects as go
 from typing import List, Dict, Tuple
 import base64
 
@@ -114,17 +114,18 @@ class DebtRepayment:
     
     async def run_agent(self, open_key, google_key, search_engine_id, fred_str, fetch_debt, redis_client) -> str:
 
-            def upload_image_to_host(image_path):
+            def upload_image_to_host(image_bytes):
                 api_endpoint = "https://api.imgbb.com/1/upload"
                 api_key = "9bb6bd78cb6c03a2dfddce20b69cc45c"
 
-                with open(image_path, "rb") as image_file:
-                    payload = {
-                        "key": api_key,
-                        "image": base64.b64encode(image_file.read()),
-                    }
+                encoded_image = base64.b64encode(image_bytes).decode('utf-8')
 
-                response = requests.post(api_endpoint, payload)
+                payload = {
+                    "key": api_key,
+                    "image": encoded_image,
+                }
+
+                response = requests.post(api_endpoint, data=payload)
 
                 if response.status_code == 200:
                     json_response = response.json()
@@ -134,62 +135,6 @@ class DebtRepayment:
                         raise Exception(f"Failed to upload image: {json_response['error']['message']}")
                 else:
                     raise Exception(f"Failed to upload image: {response.text}")
-            @tool
-            async def search_debts(debts: List[List], query: str) -> str:
-                """
-                Search for information about debts using the Google Custom Search Engine API.
-
-                Args:
-                    debts (List[List]): A list of lists where each inner list represents a row of data about debts.
-                    query (str): The query string to use for the search.
-
-                Returns:
-                    str: A JSON string containing the search results for each debt.
-                """
-                api_key = await google_key.plaintext()
-                engine_id =  await search_engine_id.plaintext()
-
-                if not debts or not debts[0]:
-                    return json.dumps({"error": "Invalid input data"})
-                
-                debt_names = debts[0][1:]
-
-                search_results = {}
-                for debt_name in debt_names:
-                    try:
-                        redis_client.delete(f"debt_info:{debt_name}")
-                        cached_result = redis_client.get(f"debt_info:{debt_name}")
-                        if cached_result:
-                            search_results[debt_name] = json.loads(cached_result)
-                        else:
-                            full_query = f"{query} {debt_name}"
-                            url = f"https://www.googleapis.com/customsearch/v1?key={api_key}&cx={engine_id}&q={full_query}"
-                            response = requests.get(url)
-                            if response.status_code == 200:
-                                items = response.json().get('items', [])[:1]
-                                summarized_results = [
-                                    {
-                                        'title': item.get('title'),
-                                        'snippet': item.get('snippet'),
-                                        'htmlSnippet': item.get('htmlSnippet')
-                                    }
-                                    for item in items
-                                ]
-                                search_results[debt_name] = {
-                                    'search_results': summarized_results
-                                }
-                                redis_client.set(f"debt_info:{debt_name}", json.dumps(search_results[debt_name]))
-                            else:
-                                search_results[debt_name] = {
-                                    'search_results': []
-                                }
-                    except Exception as e:
-                        search_results[debt_name] = {
-                            'error': str(e),
-                            'search_results': []
-                        }
-
-                return json.dumps(search_results)
             
             @tool  
             async def fetch_stocks(sectors_of_interest:str) -> str:
@@ -197,11 +142,20 @@ class DebtRepayment:
                 stocks_data = await dag.get_stocks().stocks(sectors_of_interest)
                 return json.dumps(stocks_data)
             
-            async def calculate_time_value(period: int, amount: str, rate: str) -> str:
+            async def calculate_time_value(items: List[Dict[str, str]], period: int) -> str:
                 """Calculate the future value of an amount of money over a period with a given rate."""
-                cleaned_amount = re.sub(r'[$]', '', amount)
-                future_value = await dag.calculate_time_value().calculate(period, cleaned_amount, rate, fred_str)
-                return json.dumps(future_value)
+                results = []
+                periods = list(range(1, period + 1))
+                for item in items:
+                    cleaned_amount = re.sub(r'[$]', '', item['amount'])
+                    future_value = await dag.calculate_time_value().calculate(period, cleaned_amount, item['rate'], fred_str)
+                    results.append({
+                        'type': item['type'],
+                        'name': item['name'],
+                        'future_value': future_value,
+                        'periods': periods
+                    })
+                return json.dumps(results)
             
             def create_visualizations(comparisons: List[Dict]) -> Tuple[str, str]:
                 """
@@ -224,45 +178,35 @@ class DebtRepayment:
                 the same amount would result in with different stock investments. The visualizations will 
                 be returned as JSON strings.
                 """
-                debt_names = []
-                debt_savings = []
-                stock_names = []
-                stock_returns = []
+                fig = go.Figure()
 
                 for comparison in comparisons:
                     debt_name = comparison['debt_name']
                     stock_name = comparison['stock_name']
-                    
-                    debt_savings.extend([fv for fv in comparison['future_value_debt']])
-                    stock_returns.extend([fv for fv in comparison['future_value_stock']])
-                    
-                    debt_names.extend([debt_name] * len(comparison['future_value_debt']))
-                    stock_names.extend([stock_name] * len(comparison['future_value_stock']))
 
-                debt_fig = px.bar(
-                    x=debt_names,
-                    y=debt_savings,
-                    labels={'x': 'Debt', 'y': 'Future Value ($)'},
-                    title='Future Value of $100 Payment on Debts'
+                    future_value_debt = comparison['future_value_debt']
+                    future_value_stock = comparison['future_value_stock']
+                    periods = comparison['periods']
+
+                    debt_values = [entry for entry in future_value_debt]  
+                    stock_values = [entry for entry in future_value_stock]  
+
+                    fig.add_trace(go.Scatter(x=periods, y=debt_values, mode='lines+markers', name=f'Debt: {debt_name}'))
+                    fig.add_trace(go.Scatter(x=periods, y=stock_values, mode='lines+markers', name=f'Stock: {stock_name}'))
+
+                fig.update_layout(
+                    title='Future Value Comparison of Debts and Stocks',
+                    xaxis_title='Time Periods',
+                    yaxis_title='Future Value ($)',
+                    legend_title='Investments'
                 )
-                debt_fig.update_layout(barmode='group')
 
-                # Create Stock Returns Bar Chart
-                stock_fig = px.bar(
-                    x=stock_names,
-                    y=stock_returns,
-                    labels={'x': 'Stock', 'y': 'Future Value ($)'},
-                    title='Future Value of $100 Investment in Stocks'
-                )
-                stock_fig.update_layout(barmode='group')
-
-                debt_image_bytes = debt_fig.to_image(format="png")
-                stock_image_bytes = stock_fig.to_image(format="png")
+                debt_image_bytes = fig.to_image(format="png")
 
                 debt_image_url = upload_image_to_host(debt_image_bytes)
-                stock_image_url = upload_image_to_host(stock_image_bytes)
 
-                return debt_image_url, stock_image_url
+                return debt_image_url, debt_image_url  
+
             
             @tool
             def credit_impact_multiplier(debt_type_list, credit_score_impact_list, legal_ramifications_list, base_interest_rate_list):
@@ -334,36 +278,62 @@ class DebtRepayment:
                 remaining_funds = available_funds
                 increment=100
                 time_period=5
-                
+                items_to_calculate = []
+
                 for debt in debts:
                     debt_name = debt['debt_name']
-                    debt_amount = str(debt['debt_amount'])
                     interest_rate = debt['interest_rate']
-                    multiplier_score = multiplier_scores.get(debt['debt_name'], 0.1)
+                    items_to_calculate.append({
+                        'type': 'debt',
+                        'name': debt_name,
+                        'amount': str(increment),
+                        'rate': str(interest_rate)
+                    })
+                
+                for stock in stock_data[:5]:
+                    stock_name = stock['symbol']
+                    stock_return = stock['average_return']
+                    items_to_calculate.append({
+                        'type': 'stock',
+                        'name': stock_name,
+                        'amount': str(increment),
+                        'rate': str(stock_return)
+                    })
+                
+                future_values_json = await calculate_time_value(items_to_calculate, time_period)
+                future_values = json.loads(future_values_json)
 
+                future_value_debts = {fv['name']: {'values': fv['future_value'], 'periods': fv['periods']} for fv in future_values if fv['type'] == 'debt'}
+                future_value_stocks = {fv['name']: {'values': fv['future_value'], 'periods': fv['periods']} for fv in future_values if fv['type'] == 'stock'}
+
+                for debt in debts:
+                    debt_name = debt['debt_name']
+                    interest_rate = debt['interest_rate']
+                    multiplier_score = multiplier_scores.get(debt_name, 0.1)
                     if interest_rate == 0:
                         interest_savings_percent = multiplier_score
                     else:
                         interest_savings_percent = interest_rate + multiplier_score
-
-                    future_value_debt = json.loads(await calculate_time_value(time_period, str(increment), str(interest_rate)))
+                    
+                    future_value_debt = future_value_debts[debt_name]['values']
+                    periods = future_value_debts[debt_name]['periods']
 
                     for stock in stock_data[:5]:
                         stock_name = stock['symbol']
-                        stock_return = stock['average_return']
-                        future_value_stock = json.loads(await calculate_time_value(time_period, str(increment), str(stock_return)))
+                        stock_return_percent = stock['average_return']
+                        future_value_stock = future_value_stocks[stock_name]['values']
 
-
-                        comparison= {
+                        comparison = {
                             'debt_name': debt_name,
                             'debt_interest_rate': interest_rate,
                             'stock_name': stock_name,
-                            'stock_return_percent': stock_return,
-                            'future_value_debt': future_value_debt,
-                            'future_value_stock': future_value_stock,
+                            'stock_return_percent': stock_return_percent,
+                            'future_value_debt': json.dumps(future_value_debt),
+                            'future_value_stock': json.dumps(future_value_stock),
                             'interest_savings_percent': interest_savings_percent,
+                            'periods': periods
                         }
-                    optimal_payments['comparisons'].append(comparison)
+                        optimal_payments['comparisons'].append(comparison)
 
                 optimal_payments['comparisons'].sort(
                     key=lambda x: (float(x['stock_return_percent']) - float(x['interest_savings_percent'])),
@@ -384,7 +354,6 @@ class DebtRepayment:
                         optimal_payments['stock_investments'].append({'stock_name': stock_name, 'investment_amount': allocation_amount})
                         remaining_funds -= allocation_amount
                     else:
-                        # Allocate to debt
                         allocation_amount = remaining_funds * (interest_savings_percent / (stock_return_percent + interest_savings_percent))
                         for payment in optimal_payments['debt_payments']:
                             if payment['debt_name'] == debt_name:
@@ -454,30 +423,22 @@ class DebtRepayment:
                         ("system", """You are an autonmous financial planner. Your goal is to analyze the given stock and debt data to suggest an optimal payment plan for debt repayment and stock purchases for a single month assuming a balance of $2000.
 
                 Instructions:                
-                1. **Gather Debt Information**:
-                    - For each debt, construct a comprehensive search query to gather information on the following aspects:
-                        - Any relevant factors for prioritizing debt repayment
-                    - Use the `search_debts` tool, providing the list of debts (including both the debt name and debt type), the constructed query string, your Google Custom Search Engine API key, and the ID of your custom search engine.
-                    - The tool must first check the Redis cache for existing data. If data is found, it should return the cached data. If not, it should perform the search and store the results in the cache for future use.
-                    - Summarize the search results after retrieving them to keep the length of the data short. Include only the most relevant information and condense the content to avoid exceeding the context length limit.
-                    - Return JSON in a single line without whitespaces.
-
-                2. **Classify Information**:
+                1. **Classify Information**:
                 - Based on the information available, classify the impact on the credit score as 'high', 'medium', or 'low' and the legal ramifications as 'severe', 'moderate', or 'minor'.
                 - These classifications should be derived from the textual information obtained from the search results.
 
-                3. **Adjust Interest Rates**:
+                2. **Adjust Interest Rates**:
                 - Use the `credit_impact_multiplier` tool to adjust the interest rate for each debt based on the classifications and the base interest rate.
                 - The adjusted interest rate will reflect the combined impact on the credit score and legal ramifications.
                 - Return JSON in a single line without whitespaces.
 
-                4. **Retrieve Stock Data**:
+                3. **Retrieve Stock Data**:
                 - Use the `fetch_stocks` tool to get performance data for top stocks in Health Care, Information Technology, Financials, and Energy sectors.
                 - Ensure the stock data uses the key `symbol` for stock identifiers. Record the average returns and current prices of these top stocks.
                 - Label the fetched data as `stock_data`.
                 - Return JSON in a single line without whitespaces.
 
-                5. **Allocate Initial Payments**:
+                4. **Allocate Initial Payments**:
                 - Use the `initial_payment_allocator` tool to allocate the minimum payments first for all debts.
                 - For debts without specified minimum payments, set the payment between 5% and 15% of the debt amount, based on expected stock returns.
                 - Pass the following data to the `initial_payment_allocator` tool:
@@ -489,7 +450,7 @@ class DebtRepayment:
                 **- Ensure that `comparisons` is a list of dictionaries where each dictionary has the following keys: `debt_name`, `debt_interest_rate`, `stock_name`, `stock_return_percent`, `future_value_debt`, `future_value_stock`, and `interest_savings_percent`.**
                 - Return JSON in a single line without whitespaces.
                          
-                6. **Make Recommendations**:
+                5. **Make Recommendations**:
                 - Based on the results from the `initial_payment_allocator` and `debt_investment_optimizer` tools, determine the specific amounts to allocate towards each debt and stock investment. List two top-performing stocks to invest in and specify the exact amount to invest in each, including the average return, current price, and projected value of the investment over 2 years.
                 - Prioritize investing in high performing stocks and increase debt payments where interest rates are higher than return rates from stocks.
                 - Provide a detailed analysis with specific amounts to allocate towards each debt and how much to invest in stocks. List 1-3 top-performing stocks to invest in and specify the exact amount to invest in each.
@@ -498,7 +459,7 @@ class DebtRepayment:
                 - Return JSON in a single line without whitespaces.
 
                          
-                7. **Structure the Output**:
+                6. **Structure the Output**:
                 - Format the final decision in a JSON structure with the following fields:
                 - `debts`: List of dictionaries with each debt's `debt_name`, `amount_to_be_paid`, and `current_total`.
                 - `investments`: List of dictionaries with each investment's `symbol`, `average_return`, `current_price`, and `projected_value_in_2_years`.
@@ -512,14 +473,14 @@ class DebtRepayment:
                         MessagesPlaceholder("agent_scratchpad")
                     ]
                 )
-                toolkit = [fetch_stocks, search_debts, credit_impact_multiplier, initial_payment_allocator] 
+                toolkit = [fetch_stocks, credit_impact_multiplier, initial_payment_allocator] 
                 agent = create_openai_tools_agent(llm, toolkit, simple_prompt_template)
                 agent_executor = AgentExecutor(
                                                agent=agent, 
                                                tools=toolkit, 
                                                verbose=True,
                                                handle_parsing_errors=True,
-                                               max_iterations=50,
+                                               max_iterations=100,
                                                max_execution_time=180,
                                                return_intermediate_steps=True,
                                 )
