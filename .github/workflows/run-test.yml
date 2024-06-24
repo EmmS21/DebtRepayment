@@ -12,7 +12,7 @@ jobs:
         run: |
           missing_secrets=0
           echo "Verifying required secrets..."
-          [ -z "${{ secrets.APIKEY }}" ] && echo "APIKEY is missing" && missing_secrets=$((missing_secrets + 1))
+          [ -z "${{ secrets.apiKey }}" ] && echo "apiKey is missing" && missing_secrets=$((missing_secrets + 1))
           [ -z "${{ secrets.SHEET_TWO }}" ] && echo "SHEET_TWO is missing" && missing_secrets=$((missing_secrets + 1))
           [ -z "${{ secrets.OPEN_KEY }}" ] && echo "OPEN_KEY is missing" && missing_secrets=$((missing_secrets + 1))
           [ -z "${{ secrets.SEND_GRID }}" ] && echo "SEND_GRID is missing" && missing_secrets=$((missing_secrets + 1))
