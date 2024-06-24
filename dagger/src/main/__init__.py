@@ -7,7 +7,6 @@ from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 import re
 import redis
-from langchain.globals import set_debug
 import requests
 import plotly.graph_objects as go
 from typing import Dict, Tuple
@@ -22,7 +21,7 @@ logger = logging.getLogger(__name__)
 @object_type
 class DebtRepayment:
     @function
-    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, brevo_key: Secret, name: str) -> dict[str, str]:
+    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, send_grid: Secret, name: str, send_to: str) -> dict[str, str]:
         """
         Fetch data from two Google Sheets and run an agent to analyze the debts and investments.
         
@@ -43,12 +42,43 @@ class DebtRepayment:
         fetch_debt = self.restructure_data(fetch_debt)
         decision = await self.run_agent(open_key, fetch_debt)        
         output = decision.get("decision", {}).get("output", "")
-        clean_data = json.loads(json.dumps(output))
 
-        return await self.send_email(brevo_key, 'Emmanuel from GetStocked', 'emmanuelsibandaus@gmail.com', 'emmanuelsibanda21@gmail.com', clean_data)
-        # return clean_decision
+        def find_json(s):
+            bracket_count = 0
+            start = None
+            for i, char in enumerate(s):
+                if char == '{':
+                    if bracket_count == 0:
+                        start = i
+                    bracket_count += 1
+                elif char == '}':
+                    bracket_count -= 1
+                    if bracket_count == 0 and start is not None:
+                        return s[start:i+1]
+            return None
+
+        json_str = find_json(output)
+        clean_data = None
+
+        if json_str:
+            try:
+                json_str = re.sub(r"(?<!\\)'([^']+)'(?=\s*:)", r'"\1"', json_str)
+                json_str = re.sub(r':\s*\'([^\']+)\'', r': "\1"', json_str)
+                
+                clean_data = json.loads(json_str)
+            except json.JSONDecodeError as e:
+                print(f"Error decoding JSON object: {e}")  
+
+        if clean_data is None:
+            print("Error: No valid JSON objects found")
+            return None
+
+        print("Clean data:", clean_data)  
+        
+        return await self.send_email(send_grid, 'Emmanuel from GetStocked', 'emmanuelsibandaus@gmail.com', send_to, json.dumps(clean_data))
+        
     
-    async def send_email(self, brevo_key: Secret, sender_name: str, sender_email: str, recipient_email: str, clean_decision: dict) -> None:
+    async def send_email(self, send_grid: Secret, sender_name: str, sender_email: str, recipient_email: str, clean_decision: dict) -> None:
         """
         Send an email campaign using Brevo's API.
 
@@ -72,9 +102,9 @@ class DebtRepayment:
 
         if not cleaned_data:
             print("Error: No valid JSON object found")
-            return
+            return None
             
-        api_key = await brevo_key.plaintext()
+        api_key = await send_grid.plaintext()
         now = datetime.now()
         current_month = now.strftime("%B")
         current_year = now.year
@@ -574,16 +604,10 @@ class DebtRepayment:
                                             max_execution_time=180,
                                             return_intermediate_steps=True,
                             )
-
-            logger.info("AgentExecutor initialized")
         except Exception as e:
-            logger.error(f"Error initializing AgentExecutor: {e}")
-            raise e
-        
+            raise e        
         try:
-            set_debug(True)
             result = await agent_executor.ainvoke(input_data)
-            logger.info(f"Final decision: {result}")
             return {"decision": result, "agent_scratchpad": input_data["agent_scratchpad"]}
         except Exception as e:
             logger.error(f"Error running agent: {e}")
