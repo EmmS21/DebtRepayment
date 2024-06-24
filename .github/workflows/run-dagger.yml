@@ -13,23 +13,7 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v2
-
-      - name: Verify Secrets
-        run: |
-          missing_secrets=0
-          echo "Verifying required secrets..."
-          [ -z "${{ secrets.APIKEY }}" ] && echo "APIKEY is missing" && missing_secrets=$((missing_secrets + 1))
-          [ -z "${{ secrets.SHEET_TWO }}" ] && echo "SHEET_TWO is missing" && missing_secrets=$((missing_secrets + 1))
-          [ -z "${{ secrets.OPEN_KEY }}" ] && echo "OPEN_KEY is missing" && missing_secrets=$((missing_secrets + 1))
-          [ -z "${{ secrets.SEND_GRID }}" ] && echo "SEND_GRID is missing" && missing_secrets=$((missing_secrets + 1))
-          [ -z "${{ secrets.SHEET }}" ] && echo "SHEET is missing" && missing_secrets=$((missing_secrets + 1))
-          [ -z "${{ secrets.DAGGER_CLOUD_TOKEN }}" ] && echo "DAGGER_CLOUD_TOKEN is missing" && missing_secrets=$((missing_secrets + 1))
-          if [ $missing_secrets -ne 0 ]; then
-            echo "Error: Missing $missing_secrets secrets. Check your GitHub repository settings."
-            exit 1
-          fi
-        shell: bash
-
+        
       - name: Dagger for GitHub
         uses: dagger/dagger-for-github@v5.6.0
         with:
