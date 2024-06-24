@@ -1,0 +1,29 @@
+name: Run Debt Repayment Pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      send_to:
+        description: 'Send To'
+        required: true
+
+jobs:
+  run-dagger:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      
+      - name: Dagger for GitHub
+        uses: dagger/dagger-for-github@v5.6.0
+        with:
+          verb: call 
+          module: github.com/EmmS21/DebtRepayment
+          args: fetch-data --apiKey=env:API_KEY --sheet=env:SHEET --sheet_two=env:SHEET_TWO --open_key=env:OPENAI --send_grid=env:SEND_GRID --name='Sheet1' --send_to=${{ github.event.inputs.send_to }}
+          cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
+        env:
+          API_KEY: ${{ secrets.APIKEY }}
+          SHEET_TWO: ${{ secrets.SHEET_TWO }}
+          OPENAI: ${{ secrets.OPEN_KEY }}
+          SEND_GRID: ${{ secrets.SEND_GRID }}
+          SHEET: ${{ secrets.SHEET }}
