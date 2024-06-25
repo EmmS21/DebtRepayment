@@ -127,6 +127,7 @@ class DebtRepayment:
         try:
             sg = sendgrid.SendGridAPIClient(api_key)
             response = sg.send(message)
+            return True
             print(response.status_code)
             print(response.body)
             print(response.headers)
