@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 @object_type
 class DebtRepayment:
     @function
-    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, send_grid: Secret, name: str, send_to: str) -> dict[str, str]:
+    async def fetch_data(self, apiKey: Secret, sheet: Secret, sheet_two: Secret, open_key: Secret, send_grid: Secret, name: str, send_to: str, email: str, imgrKey: Secret) -> dict[str, str]:
         """
         Fetch data from two Google Sheets and run an agent to analyze the debts and investments.
         
@@ -31,7 +31,7 @@ class DebtRepayment:
             sheet_two (Secret): Secret for the second Google Sheet.
             open_key (Secret): API key for OpenAI.
             name (str): Name of the sheet to fetch data from.
-        
+            send_to (str): Email to send output to
         Returns:
             str: Cleaned decision output from the agent.
         """        
@@ -59,7 +59,6 @@ class DebtRepayment:
 
         json_str = find_json(output)
         clean_data = None
-
         if json_str:
             try:
                 json_str = re.sub(r"(?<!\\)'([^']+)'(?=\s*:)", r'"\1"', json_str)
@@ -71,11 +70,8 @@ class DebtRepayment:
 
         if clean_data is None:
             print("Error: No valid JSON objects found")
-            return None
-
-        print("Clean data:", clean_data)  
-        
-        return await self.send_email(send_grid, 'Emmanuel from GetStocked', 'emmanuelsibandaus@gmail.com', send_to, json.dumps(clean_data))
+            return None        
+        return await self.send_email(send_grid, 'Emmanuel from GetStocked', email, send_to, json.dumps(clean_data))
         
     
     async def send_email(self, send_grid: Secret, sender_name: str, sender_email: str, recipient_email: str, clean_decision: dict) -> None:
@@ -94,11 +90,10 @@ class DebtRepayment:
         if not isinstance(clean_decision, str):
             clean_decision = json.dumps(clean_decision)
 
-        # Handle each JSON object separately
         cleaned_data = None
         for line in clean_decision.splitlines():
             cleaned_data = json.loads(line)
-            break  # We only need the first JSON object
+            break  
 
         if not cleaned_data:
             print("Error: No valid JSON object found")
@@ -127,7 +122,6 @@ class DebtRepayment:
         try:
             sg = sendgrid.SendGridAPIClient(api_key)
             response = sg.send(message)
-            return True
             print(response.status_code)
             print(response.body)
             print(response.headers)
@@ -168,27 +162,6 @@ class DebtRepayment:
         result_json = json.dumps(result)
         return result_json
     
-    def process_balance_data(self, data: str) -> str:
-        """
-        Process balance data to extract specific columns and return as JSON string.
-
-        Args:
-            data (str): JSON string containing balance data.
-
-        Returns:
-            str: JSON string of processed balance data.
-        """
-        data_json = json.loads(data)
-        if not data_json:
-            return json.dumps([])
-        required_columns = ['Interest Checking - Fixed (xxxx5222)', 'Savings Account (xxxx8919)']        
-        processed_data = []
-        for row in data_json:
-            filtered_row = {col: row[col] for col in required_columns if col in row}
-            if filtered_row:
-                processed_data.append(filtered_row)
-        return json.dumps(processed_data)
-
     def clean_amount(self, amount: str) -> float:
         """
         Remove dollar sign and commas from amount and convert to float.
@@ -220,7 +193,7 @@ class DebtRepayment:
                 row['Amount'] = self.clean_amount(row['Amount'])
         return json.dumps(data_json)
     
-    async def run_agent(self, open_key, fetch_debt) -> str:
+    async def run_agent(self, open_key, fetch_debt, imgrKey) -> str:
         """
         Run an agent to analyze debts and investments and return a decision.
 
@@ -231,6 +204,7 @@ class DebtRepayment:
         Returns:
             str: JSON string containing the decision from the agent.
         """
+        imgrAPIKey = await imgrKey.plaintext()
         def upload_image_to_host(image_bytes):
             """
             Upload image to a hosting service and return the URL.
@@ -242,7 +216,7 @@ class DebtRepayment:
                 str: URL of the uploaded image.
             """
             api_endpoint = "https://api.imgbb.com/1/upload"
-            api_key = "9bb6bd78cb6c03a2dfddce20b69cc45c"
+            api_key = imgrAPIKey
             encoded_image = base64.b64encode(image_bytes).decode('utf-8')
             payload = {
                 "key": api_key,
@@ -613,4 +587,4 @@ class DebtRepayment:
         except Exception as e:
             logger.error(f"Error running agent: {e}")
             raise e
-        
+    
